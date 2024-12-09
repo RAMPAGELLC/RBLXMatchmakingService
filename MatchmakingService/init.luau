@@ -6,6 +6,7 @@ local MatchmakingService = {}
 MatchmakingService.__index = MatchmakingService
 
 -- Services
+local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
@@ -14,6 +15,7 @@ local TeleportService = game:GetService("TeleportService")
 
 local Config = require(script:WaitForChild("Config"))
 local Types = require(script:WaitForChild("Types"))
+local cron = require(script:WaitForChild("luaucron"))
 
 -- Utilities
 local function generateCode(length)
@@ -32,6 +34,8 @@ end
 function MatchmakingService.new(): Types.MatchmakingService
 	local self = setmetatable({}, MatchmakingService)
 
+	self.ServerId = HttpService:GenerateGUID(false)
+	self.PlayerCache = {} -- In-memory temp player cache
 	self.Parties = {} -- In-memory party cache
 	self.PublicParties = {} -- Cached public parties
 
@@ -49,6 +53,47 @@ function MatchmakingService.new(): Types.MatchmakingService
 		end
 	end)
 
+	for i, player: Player in pairs(Players:GetPlayers()) do
+		if not player:IsA("Player") then
+			continue
+		end
+
+		self.PlayerCache[player.UserId] = { true }
+
+		-- Some old server might still have them cached and will say they are not connected, even though
+		-- they are in this new one. So we need to delete their cache.
+		MessagingService:PublishAsync(
+			Config.LOBBY_TOPIC,
+			{ Action = "DeletePlayerCache", IgnoreServerId = self.ServerId, PlayerId = player.UserId }
+		)
+	end
+
+	Players.PlayerAdded:Connect(function(player: Player)
+		self.PlayerCache[player.UserId] = { true }
+
+		MessagingService:PublishAsync(
+			Config.LOBBY_TOPIC,
+			{ Action = "DeletePlayerCache", IgnoreServerId = self.ServerId, PlayerId = player.UserId }
+		)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player: Player)
+		self.PlayerCache[player.UserId] = { false, os.time() + (5 * 60) }
+	end)
+
+	cron.schedule("*/1 * * * *", function()
+		for i, v in pairs(self.ToDeleteCache) do
+			if v[2] == nil or v[1] then
+				continue
+			end
+
+			if os.time() >= v[2] then
+				self.PlayerCache[i] = nil
+				self.ToDeleteCache[i] = nil
+			end
+		end
+	end)
+
 	return self
 end
 
@@ -59,28 +104,72 @@ end
 function MatchmakingService:HandleLeaderDisconnect(partyCode: string, partyData: Types.PartyData)
 	if #partyData.Members > 0 and Config.REASSIGN_LEADER_INSTEAD_OF_DISBAND then
 		partyData.Leader = partyData.Members[1]
-		self:BroadcastLobbyUpdate("LeaderChange", partyData)
+		self:SaveParty(partyData.Code, partyData)
 	else
 		self:DisbandParty(partyCode)
 	end
 end
 
-function MatchmakingService:IsPlayerConnected(playerId: number): boolean
-	return Players:GetPlayerByUserId(playerId) ~= nil
+function MatchmakingService:IsPlayerConnected(playerId: number, callback: (isConnected: boolean) -> nil): boolean
+	local player = Players:GetPlayerByUserId(playerId)
+
+	if player then
+		return true
+	end
+
+	local IsConnected: boolean = false
+
+	local con
+	con = MessagingService:SubscribeAsync("PlayerConnectionStatus", function(message)
+		local data = message.Data
+
+		if data.PlayerId == playerId then
+			IsConnected = data.IsConnected
+			con:Disconnect()
+
+			if callback then
+				callback(IsConnected)
+			end
+		end
+	end)
+
+	MessagingService:PublishAsync("CheckPlayerConnection", { PlayerId = playerId })
+
+	local waitTime = 0
+
+	if callback then
+		task.spawn(function()
+			repeat
+				waitTime += 1
+				task.wait(1)
+			until IsConnected or waitTime >= 5
+
+			return callback(IsConnected)
+		end)
+
+		return false
+	end
+
+	repeat
+		waitTime += 1
+		task.wait(1)
+	until IsConnected or waitTime >= 3
+
+	return IsConnected
 end
 
 function MatchmakingService:CheckForDisconnectedPlayers()
 	for partyCode, partyData in pairs(self.Parties) do
-		for i = #partyData.Members, 1, -1 do
-			local memberId = partyData.Members[i]
+		if not partyData.GameStarted and not self:IsPartyReservedServer(partyCode) then
+			for i = #partyData.Members, 1, -1 do
+				local memberId = partyData.Members[i]
+				if not self:IsPlayerConnected(memberId) then
+					table.remove(partyData.Members, i)
+					self:SaveParty(partyData.Code, partyData)
 
-			if not self:IsPlayerConnected(memberId) then
-				table.remove(partyData.Members, i)
-
-				if memberId == partyData.Leader then
-					self:HandleLeaderDisconnect(partyCode, partyData)
-				else
-					self:BroadcastLobbyUpdate("MemberDisconnect", partyData, memberId)
+					if memberId == partyData.Leader then
+						self:HandleLeaderDisconnect(partyCode, partyData)
+					end
 				end
 			end
 		end
@@ -293,7 +382,7 @@ function MatchmakingService:DeleteParty(code: string): (boolean, string?)
 end
 
 -- Lobby Updates
-function MatchmakingService:BroadcastLobbyUpdate(action: string, data: Types.PartyData)
+function MatchmakingService:BroadcastLobbyUpdate(action: string, data: Types.PartyData?)
 	MessagingService:PublishAsync(Config.LOBBY_TOPIC, { Action = action, Party = data })
 end
 
@@ -307,28 +396,19 @@ function MatchmakingService:SubscribeToLobbyUpdates()
 			self.PublicParties[data.Party.Code] = data.Party
 		elseif data.Action == "Remove" then
 			self.PublicParties[data.Party.Code] = nil
-		elseif data.Action == "LeaderChange" then
-			local partyData = self:GetParty(data.Party.Code)
-
-			if partyData then
-				partyData.Leader = data.Party.Leader
-				self:SaveParty(data.Party.Code, partyData)
+		elseif data.Action == "DeletePlayerCache" then
+			if self.ServerId == data.IgnoreServerId then
+				return
 			end
-		elseif data.Action == "MemberDisconnect" then
-			local partyData = self:GetParty(data.Party.Code)
 
-			if partyData then
-				for i, memberId in ipairs(partyData.Members) do
-					if memberId == data.MemberId then
-						table.remove(partyData.Members, i)
-						break
-					end
-				end
-				
-				self:SaveParty(data.Party.Code, partyData)
+			self.PlayerCache[data.PlayerId] = nil
+		elseif data.Action == "CheckPlayerConnection" then
+			if self.PlayerCache[data.PlayerId] then
+				MessagingService:PublishAsync(
+					"PlayerConnectionStatus",
+					{ PlayerId = data.PlayerId, IsConnected = self.PlayerCache[data.PlayerId][1] }
+				)
 			end
-		elseif data.Action == "Disband" then
-			self:DeleteParty(data.Party.Code)
 		end
 	end)
 end
@@ -369,7 +449,12 @@ function MatchmakingService:GetPublicParties(): { [string]: Types.PartyData }
 end
 
 -- Check if this is a party reserved server
-function MatchmakingService:IsPartyReservedServer(): boolean
+function MatchmakingService:IsPartyReservedServer(partyCode: string?): boolean
+	if partyCode then
+		local partyData = self:GetParty(partyCode)
+		return partyData and partyData.ReservedServerCode ~= nil
+	end
+
 	local reservedServerCode = game.PrivateServerId
 
 	if reservedServerCode and reservedServerCode ~= "" then

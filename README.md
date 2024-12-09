@@ -2,6 +2,9 @@
 
 The `MatchmakingService` module provides a robust system for creating, joining, and managing parties for matchmaking in Roblox games. It supports both public, private, and Roblox studio parties and includes functionality for broadcasting updates and handling data persistence.
 
+## Dependencies
+* https://github.com/Ulferno/luau-cron
+
 ## Configuration
 
 Edit the `config.luau` file to adjust the constants used by the `MatchmakingService`.

@@ -50,7 +50,7 @@ export type MatchmakingService = {
 	SubscribeToLobbyUpdates: (self: MatchmakingService) -> void,
 	FetchPublicParties: (self: MatchmakingService) -> void,
 	GetPublicParties: (self: MatchmakingService) -> { [string]: PartyData },
-	IsPartyReservedServer: (self: MatchmakingService) -> boolean,
+	IsPartyReservedServer: (self: MatchmakingService, partyCode: string?) -> boolean,
 	GetPartyDataForReservedServer: (self: MatchmakingService) -> PartyData?,
 }
 
