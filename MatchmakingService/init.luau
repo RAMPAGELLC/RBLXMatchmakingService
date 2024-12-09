@@ -39,16 +39,52 @@ function MatchmakingService.new(): Types.MatchmakingService
 	self.IsStudio = RunService:IsStudio()
 
 	self:SubscribeToLobbyUpdates()
-    self:SubscribeToTeleportPlayer()
+	self:SubscribeToTeleportPlayer()
 
 	-- Periodically fetch public parties for clients
 	task.spawn(function()
 		while task.wait(Config.PUBLIC_PARTY_UPDATE_INTERVAL) do
 			self:FetchPublicParties()
+			self:CheckForDisconnectedPlayers()
 		end
 	end)
 
 	return self
+end
+
+function MatchmakingService:DisbandParty(partyCode: string): (boolean, string?)
+	return self:DeleteParty(partyCode)
+end
+
+function MatchmakingService:HandleLeaderDisconnect(partyCode: string, partyData: Types.PartyData)
+	if #partyData.Members > 0 and Config.REASSIGN_LEADER_INSTEAD_OF_DISBAND then
+		partyData.Leader = partyData.Members[1]
+		self:BroadcastLobbyUpdate("LeaderChange", partyData)
+	else
+		self:DisbandParty(partyCode)
+	end
+end
+
+function MatchmakingService:IsPlayerConnected(playerId: number): boolean
+	return Players:GetPlayerByUserId(playerId) ~= nil
+end
+
+function MatchmakingService:CheckForDisconnectedPlayers()
+	for partyCode, partyData in pairs(self.Parties) do
+		for i = #partyData.Members, 1, -1 do
+			local memberId = partyData.Members[i]
+
+			if not self:IsPlayerConnected(memberId) then
+				table.remove(partyData.Members, i)
+
+				if memberId == partyData.Leader then
+					self:HandleLeaderDisconnect(partyCode, partyData)
+				else
+					self:BroadcastLobbyUpdate("MemberDisconnect", partyData, memberId)
+				end
+			end
+		end
+	end
 end
 
 -- Party Creation
@@ -68,8 +104,8 @@ function MatchmakingService:CreateParty(
 		GameStarted = false,
 		IsStudio = self.IsStudio,
 		Attributes = attributes or {},
-        MaxSize = maxSize or Config.PARTY_DEFAULT_MAX_SIZE,
-        ReservedServerCode = nil 
+		MaxSize = maxSize or Config.PARTY_DEFAULT_MAX_SIZE,
+		ReservedServerCode = nil,
 	}
 
 	self.Parties[partyCode] = partyData
@@ -83,9 +119,13 @@ function MatchmakingService:CreateParty(
 	return partyCode
 end
 
-function MatchmakingService:CreateInternalStudioParty(leaderId: number, attributes: { [string]: any }?, maxSize: number?): string
+function MatchmakingService:CreateInternalStudioParty(
+	leaderId: number,
+	attributes: { [string]: any }?,
+	maxSize: number?
+): string
 	assert(self.IsStudio, "Internal studio parties can only be created in Studio mode")
-    return self:CreateParty(leaderId, false, attributes, maxSize)
+	return self:CreateParty(leaderId, false, attributes, maxSize)
 end
 
 -- Join Party
@@ -180,7 +220,7 @@ function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
 		local player = Players:GetPlayerByUserId(playerId)
 
 		if player then
-			local s,e = pcall(function()
+			local s, e = pcall(function()
 				TeleportService:TeleportToPrivateServer(placeId, partyData.ReservedServerCode, { player })
 			end)
 
@@ -211,9 +251,9 @@ function MatchmakingService:SaveParty(code: string, data: Types.PartyData): (boo
 		return false, err
 	end
 
-    if data.IsPublic then
-        self:BroadcastLobbyUpdate("Update", data)
-    end
+	if data.IsPublic then
+		self:BroadcastLobbyUpdate("Update", data)
+	end
 
 	return true
 end
@@ -267,25 +307,47 @@ function MatchmakingService:SubscribeToLobbyUpdates()
 			self.PublicParties[data.Party.Code] = data.Party
 		elseif data.Action == "Remove" then
 			self.PublicParties[data.Party.Code] = nil
+		elseif data.Action == "LeaderChange" then
+			local partyData = self:GetParty(data.Party.Code)
+
+			if partyData then
+				partyData.Leader = data.Party.Leader
+				self:SaveParty(data.Party.Code, partyData)
+			end
+		elseif data.Action == "MemberDisconnect" then
+			local partyData = self:GetParty(data.Party.Code)
+
+			if partyData then
+				for i, memberId in ipairs(partyData.Members) do
+					if memberId == data.MemberId then
+						table.remove(partyData.Members, i)
+						break
+					end
+				end
+				
+				self:SaveParty(data.Party.Code, partyData)
+			end
+		elseif data.Action == "Disband" then
+			self:DeleteParty(data.Party.Code)
 		end
 	end)
 end
 
 function MatchmakingService:SubscribeToTeleportPlayer()
-    MessagingService:SubscribeAsync("TeleportPlayer", function(message)
-        local data = message.Data
-        local player = Players:GetPlayerByUserId(data.playerId)
+	MessagingService:SubscribeAsync("TeleportPlayer", function(message)
+		local data = message.Data
+		local player = Players:GetPlayerByUserId(data.playerId)
 
-        if player then
-            local s,e = pcall(function()
+		if player then
+			local s, e = pcall(function()
 				TeleportService:TeleportToPrivateServer(data.placeId, data.reservedServerCode, { player })
 			end)
 
 			if not s then
 				warn(e)
 			end
-        end
-    end)
+		end
+	end)
 end
 
 function MatchmakingService:FetchPublicParties()
@@ -308,32 +370,32 @@ end
 
 -- Check if this is a party reserved server
 function MatchmakingService:IsPartyReservedServer(): boolean
-    local reservedServerCode = game.PrivateServerId
+	local reservedServerCode = game.PrivateServerId
 
-    if reservedServerCode and reservedServerCode ~= "" then
-        for _, party in pairs(self.Parties) do
-            if party.ReservedServerCode == reservedServerCode then
-                return true
-            end
-        end
-    end
+	if reservedServerCode and reservedServerCode ~= "" then
+		for _, party in pairs(self.Parties) do
+			if party.ReservedServerCode == reservedServerCode then
+				return true
+			end
+		end
+	end
 
-    return false
+	return false
 end
 
 -- Get party data for the reserved server
 function MatchmakingService:GetPartyDataForReservedServer(): Types.PartyData?
-    local reservedServerCode = game.PrivateServerId
+	local reservedServerCode = game.PrivateServerId
 
-    if reservedServerCode and reservedServerCode ~= "" then
-        for _, party in pairs(self.Parties) do
-            if party.ReservedServerCode == reservedServerCode then
-                return party
-            end
-        end
-    end
+	if reservedServerCode and reservedServerCode ~= "" then
+		for _, party in pairs(self.Parties) do
+			if party.ReservedServerCode == reservedServerCode then
+				return party
+			end
+		end
+	end
 
-    return nil
+	return nil
 end
 
 return MatchmakingService

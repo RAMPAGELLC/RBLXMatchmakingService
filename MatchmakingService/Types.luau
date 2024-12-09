@@ -3,6 +3,7 @@
 -- Written by vq9o <business@vq9o.com>
 
 type PlayerUserId = number
+type void = nil
 
 export type PartyData = {
 	Code: string,
@@ -34,16 +35,20 @@ export type MatchmakingService = {
 		maxSize: number?
 	) -> string,
 
+	DisbandParty: (partyCode: string) -> (boolean, string?),
+	HandleLeaderDisconnect: (self: MatchmakingService, partyCode: string, partyData: PartyData) -> void,
+	IsPlayerConnected: (self: MatchmakingService, playerId: PlayerUserId) -> boolean,
+	CheckForDisconnectedPlayers: (self: MatchmakingService) -> void,
 	JoinParty: (self: MatchmakingService, playerId: PlayerUserId, code: string) -> (boolean, string?),
 	LeaveParty: (self: MatchmakingService, playerId: PlayerUserId, code: string) -> boolean,
 	StartGame: (self: MatchmakingService, code: string) -> boolean,
-	MatchPlayers: (self: MatchmakingService, players: { PlayerUserId }) -> (),
+	MatchPlayers: (self: MatchmakingService, players: { PlayerUserId }) -> void,
 	SaveParty: (self: MatchmakingService, code: string, data: PartyData) -> (boolean, string?),
 	GetParty: (self: MatchmakingService, code: string) -> PartyData?,
 	DeleteParty: (self: MatchmakingService, code: string) -> (boolean, string?),
-	BroadcastLobbyUpdate: (self: MatchmakingService, action: string, data: PartyData) -> (),
-	SubscribeToLobbyUpdates: (self: MatchmakingService) -> (),
-	FetchPublicParties: (self: MatchmakingService) -> (),
+	BroadcastLobbyUpdate: (self: MatchmakingService, action: string, data: PartyData) -> void,
+	SubscribeToLobbyUpdates: (self: MatchmakingService) -> void,
+	FetchPublicParties: (self: MatchmakingService) -> void,
 	GetPublicParties: (self: MatchmakingService) -> { [string]: PartyData },
 	IsPartyReservedServer: (self: MatchmakingService) -> boolean,
 	GetPartyDataForReservedServer: (self: MatchmakingService) -> PartyData?,
