@@ -82,14 +82,13 @@ function MatchmakingService.new(): Types.MatchmakingService
 	end)
 
 	cron.schedule("*/1 * * * *", function()
-		for i, v in pairs(self.ToDeleteCache) do
+		for i, v in pairs(self.PlayerCache) do
 			if v[2] == nil or v[1] then
 				continue
 			end
 
 			if os.time() >= v[2] then
 				self.PlayerCache[i] = nil
-				self.ToDeleteCache[i] = nil
 			end
 		end
 	end)
