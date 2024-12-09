@@ -159,18 +159,21 @@ end
 
 function MatchmakingService:CheckForDisconnectedPlayers()
 	for partyCode, partyData in pairs(self.Parties) do
-		if not partyData.GameStarted and not self:IsPartyReservedServer(partyCode) then
-			for i = #partyData.Members, 1, -1 do
-				local memberId = partyData.Members[i]
-				if not self:IsPlayerConnected(memberId) then
-					table.remove(partyData.Members, i)
-					self:SaveParty(partyData.Code, partyData)
+		if partyData.GameStarted or self:IsPartyReservedServer(partyCode) then
+			continue
+		end
 
+		for _, memberId: number in pairs(partyData.Members) do
+			self:IsPlayerConnected(memberId, function(isConnected: boolean)
+				if not isConnected then
+					table.remove(partyData.Members, table.find(partyData.Members, memberId))
+					self:SaveParty(partyData.Code, partyData)
+	
 					if memberId == partyData.Leader then
 						self:HandleLeaderDisconnect(partyCode, partyData)
 					end
 				end
-			end
+			end)
 		end
 	end
 end
