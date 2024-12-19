@@ -289,10 +289,16 @@ function MatchmakingService:StartGame(code: string): boolean
 	return true
 end
 
--- Matchmaking Logic (Override for customization)
-function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
-	-- Default behavior: Reserve a server and teleport players
+function MatchmakingService:OnLobbyMatchmake(func: (partyData: Types.PartyData) -> boolean)
+	self.CustomOnLobbyMatchmake = func;
+end
 
+function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
+	if self.CustomOnLobbyMatchmake ~= nil then
+		return self.CustomOnLobbyMatchmake(partyData)
+	end
+
+	-- Default behavior: Reserve a server and teleport players
 	local placeId = partyData.Attributes.PlaceId or game.PlaceId
 
 	if partyData.ReservedServerCode == nil then
