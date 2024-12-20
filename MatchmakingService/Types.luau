@@ -18,6 +18,20 @@ export type PartyData = {
 }
 
 export type MatchmakingService = {
+	ServerId: string,
+
+	PlayerCache: { [PlayerUserId]: boolean },
+	Parties: { [string]: PartyData },
+	PublicParties: { [string]: PartyData },
+
+	DataStore: GlobalDataStore,
+
+	IsStudio: boolean,
+	IsAPartyReservedServer: boolean,
+	PartyDataForReservedServer: PartyData?,
+
+	PartyUpdated: BindableEvent,
+
 	new: () -> MatchmakingService,
     
 	CreateParty: (
@@ -35,6 +49,7 @@ export type MatchmakingService = {
 		maxSize: number?
 	) -> string,
 
+	OnLobbyMatchmake: (self: MatchmakingService, player: Player) -> void,
 	DisbandParty: (partyCode: string) -> (boolean, string?),
 	HandleLeaderDisconnect: (self: MatchmakingService, partyCode: string, partyData: PartyData) -> void,
 	IsPlayerConnected: (self: MatchmakingService, playerId: PlayerUserId) -> boolean,

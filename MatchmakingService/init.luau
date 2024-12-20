@@ -15,7 +15,7 @@ local TeleportService = game:GetService("TeleportService")
 
 local Config = require(script:WaitForChild("Config"))
 local Types = require(script:WaitForChild("Types"))
-local cron = require(script:WaitForChild("luaucron"))
+local cron = require(script.Parent:WaitForChild("luaucron"))
 
 -- Utilities
 local function generateCode(length)
@@ -42,6 +42,11 @@ function MatchmakingService.new(): Types.MatchmakingService
 	self.DataStore = DataStoreService:GetDataStore(Config.PARTY_DATASTORE_NAME)
 	self.IsStudio = RunService:IsStudio()
 
+	self.IsAPartyReservedServer = self:IsPartyReservedServer()
+	self.PartyReservedServerData = self:GetPartyDataForReservedServer()
+
+	self.PartyUpdated = Instance.new("BindableEvent")
+
 	self:SubscribeToLobbyUpdates()
 	self:SubscribeToTeleportPlayer()
 
@@ -54,10 +59,6 @@ function MatchmakingService.new(): Types.MatchmakingService
 	end)
 
 	for i, player: Player in pairs(Players:GetPlayers()) do
-		if not player:IsA("Player") then
-			continue
-		end
-
 		self.PlayerCache[player.UserId] = { true }
 
 		-- Some old server might still have them cached and will say they are not connected, even though
@@ -69,6 +70,18 @@ function MatchmakingService.new(): Types.MatchmakingService
 	end
 
 	Players.PlayerAdded:Connect(function(player: Player)
+		if
+			self.IsPartyReservedServer
+			and Config.PARTY_SERVER_SIZE_HARD_LIMIT
+			and self.PartyReservedServerData.MaxSize > 0
+			and #Players:GetPlayers() > self.PartyReservedServerData.MaxSize
+		then
+			player:Kick(
+				"[RBLXMatchmakingService]: This server is reserved for an matchmake party, the party is currently full!"
+			)
+			return
+		end
+
 		self.PlayerCache[player.UserId] = { true }
 
 		MessagingService:PublishAsync(
@@ -168,7 +181,7 @@ function MatchmakingService:CheckForDisconnectedPlayers()
 				if not isConnected then
 					table.remove(partyData.Members, table.find(partyData.Members, memberId))
 					self:SaveParty(partyData.Code, partyData)
-	
+
 					if memberId == partyData.Leader then
 						self:HandleLeaderDisconnect(partyCode, partyData)
 					end
@@ -253,16 +266,16 @@ function MatchmakingService:LeaveParty(playerId: number, code: string): boolean
 		return false, "Party not found"
 	end
 
-	for i, member in ipairs(partyData.Members) do
-		if member == playerId then
-			table.remove(partyData.Members, i)
-			break
-		end
-	end
-
-	if #partyData.Members == 0 then
+	if #partyData.Members <= 1 then
 		self:DeleteParty(code)
 	else
+		for i, member in ipairs(partyData.Members) do
+			if member == playerId then
+				table.remove(partyData.Members, i)
+				break
+			end
+		end
+
 		self:SaveParty(code, partyData)
 	end
 
@@ -290,7 +303,7 @@ function MatchmakingService:StartGame(code: string): boolean
 end
 
 function MatchmakingService:OnLobbyMatchmake(func: (partyData: Types.PartyData) -> boolean)
-	self.CustomOnLobbyMatchmake = func;
+	self.CustomOnLobbyMatchmake = func
 end
 
 function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
@@ -352,6 +365,8 @@ function MatchmakingService:SaveParty(code: string, data: Types.PartyData): (boo
 		self:BroadcastLobbyUpdate("Update", data)
 	end
 
+    self.PartyUpdated:Fire("PARTY_UPDATED", data)
+
 	return true
 end
 
@@ -374,9 +389,11 @@ end
 
 function MatchmakingService:DeleteParty(code: string): (boolean, string?)
 	self.Parties[code] = nil
+
 	local success, err = pcall(function()
 		self.DataStore:RemoveAsync(code)
 	end)
+
 	if not success then
 		return false, err
 	end
@@ -385,6 +402,8 @@ function MatchmakingService:DeleteParty(code: string): (boolean, string?)
 		self.PublicParties[code] = nil
 		self:BroadcastLobbyUpdate("Remove", { Code = code })
 	end
+
+    self.PartyUpdated:Fire("PARTY_DELETED", code)
 
 	return true
 end
@@ -400,10 +419,13 @@ function MatchmakingService:SubscribeToLobbyUpdates()
 
 		if data.Action == "Create" then
 			self.PublicParties[data.Party.Code] = data.Party
+			self.PartyUpdated:Fire("PARTY_CREATED", data.Party)
 		elseif data.Action == "Update" then
 			self.PublicParties[data.Party.Code] = data.Party
+			self.PartyUpdated:Fire("PARTY_UPDATED", data.Party)
 		elseif data.Action == "Remove" then
 			self.PublicParties[data.Party.Code] = nil
+			self.PartyUpdated:Fire("PARTY_DELETED", data.Party.Code)
 		elseif data.Action == "DeletePlayerCache" then
 			if self.ServerId == data.IgnoreServerId then
 				return
@@ -440,7 +462,6 @@ end
 
 function MatchmakingService:FetchPublicParties()
 	-- Public parties are filtered for the current environment (studio and production)
-
 	local publicParties = {}
 
 	for code, party in pairs(self.PublicParties) do

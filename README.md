@@ -1,5 +1,4 @@
 # MatchmakingService
-
 The `MatchmakingService` module provides a robust system for creating, joining, and managing parties for matchmaking in Roblox games. It supports both public, private, and Roblox studio parties and includes functionality for broadcasting updates and handling data persistence.
 
 ## Dependencies
@@ -21,8 +20,31 @@ return {
 
 ## Usage
 
+### Listening to party events
+```luau
+MatchmakingService.PartyUpdated:Connect(function(Action: string, ...)
+	local args = {...};
+
+	if Action == "PARTY_UPDATED" then
+		local partyData: MSTypes.PartyData = args[1]
+
+		if partyData.GameStarted then
+			return
+		end
+
+		for i,v in pairs(partyData.Members) do
+			local player = Players:GetPlayerByUserId(v)
+
+			if player then
+				Remotes.Matchmaking:InvokeClient(player, "PARTY_UPDATED", partyData.Code)
+			end
+		end
+	end
+end)
+```
+
 ### Creating a Party
-```lua
+```luau
 local MatchmakingService = require(game.ServerScriptService.MatchmakingService)
 local matchmaking = MatchmakingService.new()
 
@@ -36,7 +58,7 @@ print("Party created with code:", partyCode)
 
 ### Joining a Party
 
-```lua
+```luau
 local playerId = 654321
 local success, message = matchmaking:JoinParty(playerId, partyCode)
 if success then
@@ -48,7 +70,7 @@ end
 
 ### Leaving a Party
 
-```lua
+```luau
 local success = matchmaking:LeaveParty(playerId, partyCode)
 if success then
     print("Left party successfully")
@@ -59,7 +81,7 @@ end
 
 ### Starting a Game
 
-```lua
+```luau
 local success = matchmaking:StartGame(partyCode)
 if success then
     print("Game started successfully")
@@ -70,13 +92,25 @@ end
 
 ### Custom Matchmaking Logic
 
-Override the `MatchPlayers` method to implement custom matchmaking logic. 
+You can override default the `MatchPlayers` method to implement custom matchmaking logic with ``MatchmakingService:OnLobbyMatchmake(callable)``.
 
 By-default we have reserver-server functionality & cross-server party-member teleportation. You can customize the place id by updating the party attributes field 'PlaceId'.
 
-```lua
-function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
+```luau
+MatchmakingService:OnLobbyMatchmake(function(partyData: MSTypes.PartyData)
 	local placeId = partyData.Attributes.PlaceId or game.PlaceId
+
+	if partyData.IsStudio then
+		partyData.ReservedServerCode = game.JobId
+		MatchmakingService:SaveParty(partyData.Code, partyData)
+		isReservedServer = true
+		MatchmakingService.PartyReservedServerData = partyData
+		IsPartyReservedServer()
+
+		Remotes.MissionReloaded:FireAllClients()
+
+		return
+	end
 
 	if partyData.ReservedServerCode == nil then
 		local reservedServerCode, errorMessage = TeleportService:ReserveServer(placeId)
@@ -87,7 +121,7 @@ function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
 		end
 
 		partyData.ReservedServerCode = reservedServerCode
-		self:SaveParty(partyData.Code, partyData)
+		MatchmakingService:SaveParty(partyData.Code, partyData)
 	end
 
 	for _, playerId in ipairs(partyData.Members) do
@@ -105,11 +139,11 @@ function MatchmakingService:MatchPlayers(partyData: Types.PartyData): boolean
 	end
 
 	return true
-end
+end)
 ```
 
 ### Fetching Public Parties
-```lua
+```luau
 local publicParties = matchmaking:GetPublicParties()
 for code, party in pairs(publicParties) do
     print("Public party code:", code, "Leader:", party.Leader)
@@ -117,7 +151,7 @@ end
 ```
 
 ### Getting Party Data for the Reserved Server
-```lua
+```luau
 local partyData = matchmaking:GetPartyDataForReservedServer()
 if partyData then
     print("Party data for reserved server:", partyData)
@@ -127,7 +161,7 @@ end
 ```
 
 ### Checking if This is a Party Reserved Server
-```lua
+```luau
 local isReservedServer = matchmaking:IsPartyReservedServer()
 if isReservedServer then
     print("This is a party reserved server")
@@ -135,6 +169,10 @@ else
     print("This is not a party reserved server")
 end
 ```
+
+## Featured Games
+The following featured games utilize RBLXMatchmakingService:
+* https://www.roblox.com/games/79743107297054/VR-Special-Ops-VR
 
 ## License
 This project is licensed under the MIT License.
