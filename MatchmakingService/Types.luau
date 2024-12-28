@@ -14,26 +14,27 @@ export type PartyData = {
 	IsStudio: boolean,
 	Attributes: { [string]: any },
 	MaxSize: number?,
+
+	PrivateServerId: string?,
 	ReservedServerCode: string?,
 }
 
 export type MatchmakingService = {
-	ServerId: string,
+	PartiesInitilized: boolean,
+	Parties: { [string]: PartyData },
 
 	PlayerCache: { [PlayerUserId]: boolean },
-	Parties: { [string]: PartyData },
-	PublicParties: { [string]: PartyData },
 
-	DataStore: GlobalDataStore,
-
-	IsStudio: boolean,
-	IsAPartyReservedServer: boolean,
-	PartyDataForReservedServer: PartyData?,
+	ServerId: string,
+	IsSutdio: boolean,
 
 	PartyUpdated: BindableEvent,
 
+	IsAPartyReservedServer: boolean?,
+	PartyDataForReservedServer: PartyData?,
+
 	new: () -> MatchmakingService,
-    
+
 	CreateParty: (
 		self: MatchmakingService,
 		leaderId: PlayerUserId,
@@ -49,7 +50,9 @@ export type MatchmakingService = {
 		maxSize: number?
 	) -> string,
 
-	OnLobbyMatchmake: (self: MatchmakingService, player: Player) -> void,
+	PlayerAdded: (self: MatchmakingService, player: Player) -> void,
+	InitializeParties: (self: MatchmakingService) -> void,
+	GetActiveParties: (self: MatchmakingService) -> { [string]: PartyData },
 	DisbandParty: (partyCode: string) -> (boolean, string?),
 	HandleLeaderDisconnect: (self: MatchmakingService, partyCode: string, partyData: PartyData) -> void,
 	IsPlayerConnected: (self: MatchmakingService, playerId: PlayerUserId) -> boolean,

@@ -8,14 +8,16 @@ MatchmakingService.__index = MatchmakingService
 -- Services
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
-local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
+local MemoryStoreService = game:GetService("MemoryStoreService")
 
 local Config = require(script:WaitForChild("Config"))
 local Types = require(script:WaitForChild("Types"))
 local cron = require(script.Parent:WaitForChild("luaucron"))
+
+-- TODO: Delete party properly from MSS on server shutdonw/party all left.
 
 -- Utilities
 local function generateCode(length)
@@ -30,68 +32,80 @@ local function generateCode(length)
 	return code
 end
 
--- Initialization
-function MatchmakingService.new(): Types.MatchmakingService
+local function printDictionary(dictionary: table?, indent: number)
+	assert(not indent or (indent and typeof(indent) == "number"), "Indent must be a number")
+
+	if not dictionary or (dictionary and not typeof(dictionary) == "table") then
+		return
+	end
+
+	if RunService:IsStudio() then
+		warn(dictionary)
+		return
+	end
+
+	indent = indent or 0 -- Default indentation level
+	local spacing = string.rep("  ", indent) -- Indentation spacing
+
+	for key, value in pairs(dictionary) do
+		if type(value) == "table" then
+			print(spacing .. tostring(key) .. ":")
+			printDictionary(value, indent + 1) -- Recursive call for nested tables
+		else
+			print(spacing .. tostring(key) .. ": " .. tostring(value))
+		end
+	end
+end
+
+function MatchmakingService.new(): Types.MatchmakingService & typeof(MatchmakingService)
 	local self = setmetatable({}, MatchmakingService)
 
+	self.ActivePartiesMap = MemoryStoreService:GetSortedMap(Config.PARTY_MSS_NAME)
 	self.ServerId = HttpService:GenerateGUID(false)
 	self.PlayerCache = {} -- In-memory temp player cache
 	self.Parties = {} -- In-memory party cache
-	self.PublicParties = {} -- Cached public parties
-
-	self.DataStore = DataStoreService:GetDataStore(Config.PARTY_DATASTORE_NAME)
 	self.IsStudio = RunService:IsStudio()
-
-	self.IsAPartyReservedServer = self:IsPartyReservedServer()
-	self.PartyReservedServerData = self:GetPartyDataForReservedServer()
-
 	self.PartyUpdated = Instance.new("BindableEvent")
+	self.PartiesInitilized = false
+
+	self:InitializeParties()
+
+	-- Yield until all parties are loaded into Memory.
+	repeat
+		task.wait(0.1)
+	until self.PartiesInitilized
 
 	self:SubscribeToLobbyUpdates()
 	self:SubscribeToTeleportPlayer()
 
-	-- Periodically fetch public parties for clients
-	task.spawn(function()
-		while task.wait(Config.PUBLIC_PARTY_UPDATE_INTERVAL) do
-			self:FetchPublicParties()
-			self:CheckForDisconnectedPlayers()
-		end
-	end)
+	self.IsAPartyReservedServer = self:IsPartyReservedServer()
+	self.PartyReservedServerData = self:GetPartyDataForReservedServer()
+
+	--warn("IsAPartyReservedServer", self.IsAPartyReservedServer)
+	--printDictionary(self.PartyReservedServerData)
+
+	if self.IsAPartyReservedServer then
+		-- Delete party on server shutdown
+		game:BindToClose(function()
+			self:DeleteParty(self.PartyReservedServerData.Code)
+		end)
+	end
 
 	for i, player: Player in pairs(Players:GetPlayers()) do
-		self.PlayerCache[player.UserId] = { true }
-
-		-- Some old server might still have them cached and will say they are not connected, even though
-		-- they are in this new one. So we need to delete their cache.
-		MessagingService:PublishAsync(
-			Config.LOBBY_TOPIC,
-			{ Action = "DeletePlayerCache", IgnoreServerId = self.ServerId, PlayerId = player.UserId }
-		)
+		self:PlayerAdded(player)
 	end
 
 	Players.PlayerAdded:Connect(function(player: Player)
-		if
-			self.IsPartyReservedServer
-			and Config.PARTY_SERVER_SIZE_HARD_LIMIT
-			and self.PartyReservedServerData.MaxSize > 0
-			and #Players:GetPlayers() > self.PartyReservedServerData.MaxSize
-		then
-			player:Kick(
-				"[RBLXMatchmakingService]: This server is reserved for an matchmake party, the party is currently full!"
-			)
-			return
-		end
-
-		self.PlayerCache[player.UserId] = { true }
-
-		MessagingService:PublishAsync(
-			Config.LOBBY_TOPIC,
-			{ Action = "DeletePlayerCache", IgnoreServerId = self.ServerId, PlayerId = player.UserId }
-		)
+		self:PlayerAdded(player)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		self.PlayerCache[player.UserId] = { false, os.time() + (5 * 60) }
+
+		-- Delete the party as all members left!
+		if self.IsAPartyReservedServer and (#Players:GetPlayers() <= 0) then
+			self:DeleteParty(self.PartyReservedServerData.Code)
+		end
 	end)
 
 	cron.schedule("*/1 * * * *", function()
@@ -107,6 +121,82 @@ function MatchmakingService.new(): Types.MatchmakingService
 	end)
 
 	return self
+end
+
+-- Initialize parties from MemoryStore
+function MatchmakingService:InitializeParties()
+	local attempts = 0
+	local success, result
+
+	repeat
+		success, result = pcall(function()
+			return self.ActivePartiesMap:GetRangeAsync(Enum.SortDirection.Ascending, 200)
+		end)
+		if not success then
+			attempts += 1
+			task.wait(1)
+		end
+	until success or attempts >= 3
+
+	if not success or type(result) ~= "table" then
+		warn("Failed to initialize parties after retries: " .. tostring(result))
+		return
+	end
+
+	for _, entry in ipairs(result) do
+		local code = entry.key
+		local partyData = entry.value
+
+		if code and partyData and type(partyData) == "table" then
+			self.Parties[code] = partyData
+		else
+			warn("Invalid party data entry:", entry)
+		end
+	end
+
+	self.PartiesInitilized = true
+end
+
+function MatchmakingService:PlayerAdded(player: Player)
+	if
+		Config.PARTY_SERVER_SIZE_HARD_LIMIT
+		and self.IsAPartyReservedServer
+		and self.PartyReservedServerData.MaxSize > 0
+		and #Players:GetPlayers() > self.PartyReservedServerData.MaxSize
+	then
+		player:Kick(
+			"[RBLXMatchmakingService]: This server is reserved for an matchmake party, the party is currently full!"
+		)
+
+		return
+	end
+
+	self.PlayerCache[player.UserId] = { true }
+
+	MessagingService:PublishAsync(
+		Config.LOBBY_TOPIC,
+		{ Action = "DeletePlayerCache", IgnoreServerId = self.ServerId, PlayerId = player.UserId }
+	)
+end
+
+function MatchmakingService:DeleteParty(code: string): (boolean, string?)
+	local success, err = pcall(function()
+		self.ActivePartiesMap:RemoveAsync(code)
+	end)
+
+	if not success then
+		warn("Failed to delete party data from MemoryStoreService for code:", code, "Error:", tostring(err))
+		return false, err
+	end
+
+	if self.Parties[code] then
+		self.Parties[code] = nil
+		self:BroadcastLobbyUpdate("Remove", { Code = code })
+	end
+
+	self.PartyUpdated:Fire("PARTY_DELETED", code)
+
+	return true
 end
 
 function MatchmakingService:DisbandParty(partyCode: string): (boolean, string?)
@@ -216,7 +306,6 @@ function MatchmakingService:CreateParty(
 	self:SaveParty(partyCode, partyData)
 
 	if isPublic then
-		self.PublicParties[partyCode] = partyData
 		self:BroadcastLobbyUpdate("Create", partyData)
 	end
 
@@ -354,18 +443,16 @@ function MatchmakingService:SaveParty(code: string, data: Types.PartyData): (boo
 	self.Parties[code] = data
 
 	local success, err = pcall(function()
-		self.DataStore:SetAsync(code, data)
+		self.ActivePartiesMap:SetAsync(code, data, Config.PARTY_EXPIRATION_TIME)
 	end)
 
 	if not success then
+		warn("Failed to save party data to MemoryStoreService for code:", code, "Error:", tostring(err))
 		return false, err
 	end
 
-	if data.IsPublic then
-		self:BroadcastLobbyUpdate("Update", data)
-	end
-
-    self.PartyUpdated:Fire("PARTY_UPDATED", data)
+	self:BroadcastLobbyUpdate("Update", data)
+	self.PartyUpdated:Fire("PARTY_UPDATED", data)
 
 	return true
 end
@@ -376,36 +463,16 @@ function MatchmakingService:GetParty(code: string): Types.PartyData?
 	end
 
 	local success, data = pcall(function()
-		return self.DataStore:GetAsync(code)
+		return self.ActivePartiesMap:GetAsync(code)
 	end)
 
-	if success then
-		self.Parties[code] = data
+	if success and data then
+		self.Parties[code] = data -- Cache in memory
 		return data
 	else
+		warn("Failed to get party data from MemoryStoreService for code:", code, "Error:", tostring(data))
 		return nil
 	end
-end
-
-function MatchmakingService:DeleteParty(code: string): (boolean, string?)
-	self.Parties[code] = nil
-
-	local success, err = pcall(function()
-		self.DataStore:RemoveAsync(code)
-	end)
-
-	if not success then
-		return false, err
-	end
-
-	if self.PublicParties[code] then
-		self.PublicParties[code] = nil
-		self:BroadcastLobbyUpdate("Remove", { Code = code })
-	end
-
-    self.PartyUpdated:Fire("PARTY_DELETED", code)
-
-	return true
 end
 
 -- Lobby Updates
@@ -418,13 +485,13 @@ function MatchmakingService:SubscribeToLobbyUpdates()
 		local data = message.Data
 
 		if data.Action == "Create" then
-			self.PublicParties[data.Party.Code] = data.Party
+			self.Parties[data.Party.Code] = data.Party
 			self.PartyUpdated:Fire("PARTY_CREATED", data.Party)
 		elseif data.Action == "Update" then
-			self.PublicParties[data.Party.Code] = data.Party
+			self.Parties[data.Party.Code] = data.Party
 			self.PartyUpdated:Fire("PARTY_UPDATED", data.Party)
 		elseif data.Action == "Remove" then
-			self.PublicParties[data.Party.Code] = nil
+			self.Parties[data.Party.Code] = nil
 			self.PartyUpdated:Fire("PARTY_DELETED", data.Party.Code)
 		elseif data.Action == "DeletePlayerCache" then
 			if self.ServerId == data.IgnoreServerId then
@@ -460,35 +527,36 @@ function MatchmakingService:SubscribeToTeleportPlayer()
 	end)
 end
 
-function MatchmakingService:FetchPublicParties()
+function MatchmakingService:GetActiveParties(): { [string]: Types.PartyData }
+	return self.Parties
+end
+
+function MatchmakingService:GetPublicParties(): { [string]: Types.PartyData }
 	-- Public parties are filtered for the current environment (studio and production)
 	local publicParties = {}
 
-	for code, party in pairs(self.PublicParties) do
-		if party.IsStudio == self.IsStudio then
+	for code, party: Types.PartyData in pairs(self.Parties) do
+		if party.IsStudio == self.IsStudio and party.IsPublic then
 			publicParties[code] = party
 		end
 	end
 
-	self.PublicParties = publicParties
-end
-
-function MatchmakingService:GetPublicParties(): { [string]: Types.PartyData }
-	return self.PublicParties
+	return publicParties
 end
 
 -- Check if this is a party reserved server
 function MatchmakingService:IsPartyReservedServer(partyCode: string?): boolean
 	if partyCode then
-		local partyData = self:GetParty(partyCode)
-		return partyData and partyData.ReservedServerCode ~= nil
+		local partyData = self.Parties[partyCode]
+
+		return partyData and partyData.PrivateServerId ~= nil
 	end
 
-	local reservedServerCode = game.PrivateServerId
+	local PrivateServerId = game.PrivateServerId
 
-	if reservedServerCode and reservedServerCode ~= "" then
+	if PrivateServerId and PrivateServerId ~= "" then
 		for _, party in pairs(self.Parties) do
-			if party.ReservedServerCode == reservedServerCode then
+			if party.PrivateServerId == PrivateServerId then
 				return true
 			end
 		end
@@ -499,17 +567,75 @@ end
 
 -- Get party data for the reserved server
 function MatchmakingService:GetPartyDataForReservedServer(): Types.PartyData?
-	local reservedServerCode = game.PrivateServerId
+	local PrivateServerId = game.PrivateServerId
 
-	if reservedServerCode and reservedServerCode ~= "" then
+	if PrivateServerId and PrivateServerId ~= "" then
 		for _, party in pairs(self.Parties) do
-			if party.ReservedServerCode == reservedServerCode then
-				return party
+			if party.PrivateServerId == PrivateServerId then
+				return party -- Found the matching party
 			end
 		end
 	end
 
+	warn("No party matches the reserved server code:", PrivateServerId)
 	return nil
+end
+
+type FriendData = {
+	VisitorId: number,
+	UserName: string,
+	DisplayName: string,
+	LastOnline: string,
+	IsOnline: boolean,
+	LastLocation: string,
+	PlaceId: number,
+	GameId: string,
+	LocationType: number, -- https://create.roblox.com/docs/reference/engine/classes/Player#GetFriendsOnline
+}
+
+function MatchmakingService:GetFriendLobbies(
+	Player: Player,
+	MaxFriends: number?,
+	IncludeStartedGames: boolean?
+): { Types.PartyData }
+	MaxFriends = MaxFriends or 200
+	IncludeStartedGames = IncludeStartedGames or false
+
+	assert(MaxFriends <= 200, "MaxFriends cannot be more than 200 (Roblox API limit!)")
+
+	local FriendLobbies = {}
+	local success, result = pcall(Player.GetFriendsOnline, Player, MaxFriends)
+
+	if not success then
+		warn("Failed to get friends online for player:", Player.UserId, "Error:", result)
+		return {}
+	end
+
+	for _, v: FriendData in pairs(result) do
+		if not v.IsOnline then
+			continue
+		end
+
+		if v.PlaceId == nil then
+			continue
+		end
+
+		if v.PlaceId ~= game.PlaceId then
+			continue
+		end
+
+		for _, party: Types.PartyData in pairs(self.Parties) do
+			if party.GameStarted and not IncludeStartedGames then
+				continue
+			end
+
+			if party.Leader == v.VisitorId or table.find(party.Members, v.VisitorId) then
+				table.insert(FriendLobbies, party)
+			end
+		end
+	end
+
+	return FriendLobbies
 end
 
 return MatchmakingService

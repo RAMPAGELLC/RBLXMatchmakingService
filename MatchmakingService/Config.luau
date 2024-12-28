@@ -4,9 +4,13 @@
 
 return {
     LOBBY_TOPIC = "Matchmaking_Lobby_Update",
-    PARTY_DATASTORE_NAME = "PartyData",
-    PUBLIC_PARTY_UPDATE_INTERVAL = 10, -- Seconds
+    PARTY_MSS_NAME = "ActivePartyData",
+
     PARTY_DEFAULT_MAX_SIZE = 10,
+    PARTY_EXPIRATION_TIME = 3600, -- 1 hour
+
     BLOCK_JOINING_MID_GAME = false,
-    REASSIGN_LEADER_INSTEAD_OF_DISBAND = true,
+    REASSIGN_LEADER_INSTEAD_OF_DISBAND = false,
+
+    PARTY_SERVER_SIZE_HARD_LIMIT = true,
 }
